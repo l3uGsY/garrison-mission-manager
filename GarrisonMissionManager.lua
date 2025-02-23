@@ -106,15 +106,10 @@ local function UpdateIfVisible()
 end
 
 event_frame:SetScript("OnEvent", function(self, event, ...)
-   -- if events_top_for_mission_dirty[event] then addon_env.top_for_mission_dirty = true end
-   -- if events_for_followers[event] then filtered_followers_dirty = true end
-   -- Let's clear both for now, or else we often miss one follower state update when we start mission
-
    local event_for_followers = events_for_followers[event]
    if event_for_followers or events_top_for_mission_dirty[event] then
       addon_env.top_for_mission_dirty = true
       filtered_followers_dirty = true
-      -- Update ONCE on next frame, no matter how many times event was fired
       if not update_if_visible_timer_up then
          After(0.01, UpdateIfVisible)
          update_if_visible_timer_up = true
@@ -137,8 +132,6 @@ event_frame:SetScript("OnEvent", function(self, event, ...)
    end
 
    if addon_env.RegisterManualInterraction then
-      -- function is not deleted - no manual interraction was registered yet
-      -- scan buildings/followers more agressively
       if events_for_followers[event] then
          addon_env.GarrisonBuilding_UpdateCurrentFollowers()
          addon_env.GarrisonBuilding_UpdateBestFollowers()
@@ -182,8 +175,38 @@ function event_handlers:ADDON_LOADED(event, addon_loaded)
          SV.b = addon_env.b
       end
       event_frame:UnregisterEvent("ADDON_LOADED")
-   elseif addon_loaded == "Blizzard_OrderHallUI" and addon_env.OrderHallInitUI then
-      addon_env.OrderHallInitUI()
+   elseif addon_loaded == "Blizzard_GarrisonUI" then
+      -- Hook FollowerList UpdateData here after Garrison UI is loaded
+      if GarrisonMissionFrame and GarrisonMissionFrame.FollowerList then
+         hooksecurefunc(GarrisonMissionFrame.FollowerList, "UpdateData", GarrisonFollowerList_Update_More)
+      else
+         print(addon_name .. ": Error: GarrisonMissionFrame.FollowerList not found after Blizzard_GarrisonUI loaded")
+      end
+      -- Hook GarrisonFollowerOptionDropDown initialize here after Garrison UI is loaded
+      if GarrisonFollowerOptionDropDown then
+         hooksecurefunc(GarrisonFollowerOptionDropDown, "initialize", function(self)
+            local followerID = self.followerID
+            if not followerID then return end
+            local follower = C_Garrison.GetFollowerInfo(followerID)
+            if follower and follower.isCollected then
+               info_ignore_toggle.arg1 = followerID
+               info_ignore_toggle.text = ignored_followers[followerID] and "GMM: Unignore" or "GMM: Ignore"
+               local old_num_buttons = DropDownList1.numButtons
+               local old_last_button = _G["DropDownList1Button" .. old_num_buttons]
+               local old_is_cancel = old_last_button.value == CANCEL
+               if old_is_cancel then
+                  DropDownList1.numButtons = old_num_buttons - 1
+               end
+               UIDropDownMenu_AddButton(info_ignore_toggle)
+               if old_is_cancel then
+                  UIDropDownMenu_AddButton(info_cancel)
+               end
+            end
+         end)
+      else
+         print(addon_name .. ": Error: GarrisonFollowerOptionDropDown not found after Blizzard_GarrisonUI loaded")
+      end
+      if addon_env.OrderHallInitUI then addon_env.OrderHallInitUI() end
    end
 end
 local loaded, finished = IsAddOnLoaded(addon_name)
@@ -263,12 +286,9 @@ end
 
 local function GetFilteredFollowers(type_id)
    if filtered_followers_dirty then
-
       for follower_type_idx = 1, #supported_follower_types do
          local follower_type = supported_follower_types[follower_type_idx]
-
          local followers = GetFollowers(follower_type)
-
          local container = filtered_followers[follower_type]
          wipe(container)
          local count = 0
@@ -299,10 +319,8 @@ local function GetFilteredFollowers(type_id)
                   free_non_troop = free_non_troop or not troop
                end
 
-               -- How much extra XP follower can gain before becoming maxed out?
                local xp_cap
                if xp_to_level == 0 then
-                  -- already maxed
                   xp_cap = 0
                else
                   local quality = follower.quality
@@ -313,22 +331,10 @@ local function GetFilteredFollowers(type_id)
                   elseif quality == 3 and level == GARRISON_FOLLOWER_MAX_LEVEL then
                      xp_cap = xp_to_level
                   else
-                     -- Treat as uncapped. Not exactly true for lv. 98 and lower epics, but will do.
                      xp_cap = 999999
                   end
                end
-               -- follower_xp_cap[follower.followerID] = xp_cap
 
-               -- Troops can be of the same classSpec - e.g. 76 for Ebon Ravagers, but have
-               -- 1) Different garrFollowerID templates - essentially making them different followers with different abilities hiding under same name
-               -- 2) Different temporary abilities (like DK's Horn of Winter)
-               -- This can be optimized by hardcoding what classes have those different templates and what even have temporary abilities in their Hall,
-               -- but it's better to keep things simple AND make GMM automatically adjust for whatever future changes by just scanning each troop's
-               -- abilities and using spec + abilities list as unique key.
-               -- Spec is included in uniq to prevent two different followers (with different recruiters) to fold together in case they ever happen to have
-               -- same abilities, though I'm pretty sure that's impossible.
-               --
-               -- TODO: possible future small optimization: if there's only one troop for given classSpec, we don't need to calculate list
                if troop then
                   local abilities = GetFollowerAbilities(follower.followerID)
                   for idx = 1, #abilities do
@@ -338,11 +344,9 @@ local function GetFilteredFollowers(type_id)
                   follower.troop_uniq = follower.classSpec .. ',' .. concat(abilities, ',')
                end
 
-               -- Alpha debug
                if troop and GMM_OLDSKIP then
                   follower.troop_uniq = follower.classSpec
                end
-
             until true
          end
 
@@ -353,8 +357,6 @@ local function GetFilteredFollowers(type_id)
          container.type = follower_type
          tsort(container, SortFollowers)
       end
-
-      -- dump(filtered_followers)
 
       filtered_followers_dirty = false
       addon_env.top_for_mission_dirty = true
@@ -391,29 +393,7 @@ local info_cancel = {
    text = CANCEL
 }
 
-hooksecurefunc(GarrisonFollowerOptionDropDown, "initialize", function(self)
-   local followerID = self.followerID
-   if not followerID then return end
-   local follower = C_Garrison.GetFollowerInfo(followerID)
-   if follower and follower.isCollected then
-      info_ignore_toggle.arg1 = followerID
-      info_ignore_toggle.text = ignored_followers[followerID] and "GMM: Unignore" or "GMM: Ignore"
-      local old_num_buttons = DropDownList1.numButtons
-      local old_last_button = _G["DropDownList1Button" .. old_num_buttons]
-      local old_is_cancel = old_last_button.value == CANCEL
-      if old_is_cancel then
-         DropDownList1.numButtons = old_num_buttons - 1
-      end
-      UIDropDownMenu_AddButton(info_ignore_toggle)
-      if old_is_cancel then
-         UIDropDownMenu_AddButton(info_cancel)
-      end
-   end
-end)
-
 local function GarrisonFollowerList_Update_More(self)
-   -- Somehow Blizzard UI insists on updating hidden frames AND explicitly updates them OnShow.
-   --  Following suit is just a waste of CPU, so we'll update only when frame is actually visible.
    if not self:IsVisible() then return end
 
    local followerFrame = self:GetParent()
@@ -434,9 +414,9 @@ local function GarrisonFollowerList_Update_More(self)
       local portrait_frame = follower_frame.PortraitFrame
       local level_border = portrait_frame.LevelBorder
 
-      if ( index <= numFollowers ) then
+      if (index <= numFollowers) then
          local follower = followers[followersList[index]]
-         if ( follower.isCollected ) then
+         if (follower.isCollected) then
             if ignored_followers[follower.followerID] then
                local BusyFrame = follower_frame.BusyFrame
                BusyFrame.Texture:SetColorTexture(0.5, 0, 0, 0.3)
@@ -459,7 +439,6 @@ local function GarrisonFollowerList_Update_More(self)
       end
    end
 end
-hooksecurefunc(GarrisonMissionFrame.FollowerList, "UpdateData", GarrisonFollowerList_Update_More)
 
 gmm_buttons.StartMission = MissionPage.StartMissionButton
 
@@ -468,6 +447,3 @@ function GMM_Click(button_name)
    local button = gmm_buttons[button_name]
    if button and button:IsVisible() then button:Click() end
 end
-
--- /dump GarrisonMissionFrame.MissionTab.MissionList.listScroll.buttons
--- /dump GarrisonMissionFrame.MissionTab.MissionList.listScroll.scrollBar
