@@ -1,11 +1,16 @@
 local addon_name, addon_env = ...
 if not addon_env.load_this then return end
 
+-- Confused about mix of CamelCase and_underscores?
+-- Camel case comes from copypasta of how Blizzard calls returns/fields in their code and deriveates
+-- Underscore are my own variables
+
 local c_garrison_cache = addon_env.c_garrison_cache
 local FindBestFollowersForMission = addon_env.FindBestFollowersForMission
 local top = addon_env.top
 local top_yield = addon_env.top_yield
 local top_unavailable = addon_env.top_unavailable
+local Widget = addon_env.Widget
 
 -- [AUTOLOCAL START]
 local After = C_Timer.After
@@ -39,8 +44,10 @@ local tsort = table.sort
 local type = type
 local wipe = wipe
 -- [AUTOLOCAL END]
+local g = UnitGUID
 
 local MissionPage = GarrisonMissionFrame.MissionTab.MissionPage
+local MissionPageFollowers = MissionPage.Followers
 
 -- Config
 SV_GarrisonMissionManager = {}
@@ -49,14 +56,18 @@ addon_env.ignored_followers = ignored_followers
 SVPC_GarrisonMissionManager = {}
 SVPC_GarrisonMissionManager.ignored_followers = ignored_followers
 
+local button_suffixes = { '', 'Yield', 'Unavailable' }
 addon_env.button_suffixes = button_suffixes
+
+local top_for_mission = {}
 addon_env.top_for_mission = top_for_mission
 addon_env.top_for_mission_dirty = true
 
 local supported_follower_types = { Enum_GarrisonFollowerType_FollowerType_6_0_GarrisonFollower, Enum_GarrisonFollowerType_FollowerType_6_0_Boat, Enum_GarrisonFollowerType_FollowerType_7_0_GarrisonFollower, Enum_GarrisonFollowerType_FollowerType_8_0_GarrisonFollower }
 local filtered_followers = {}
-for _, type_id in pairs(supported_follower_types) do filtered_followers[type_id] = {} end
+for _, type in pairs(supported_follower_types) do filtered_followers[type] = {} end
 local filtered_followers_dirty = true
+local follower_xp_cap = {}
 
 addon_env.event_frame = addon_env.event_frame or CreateFrame("Frame")
 addon_env.event_handlers = addon_env.event_handlers or {}
@@ -76,15 +87,17 @@ local events_top_for_mission_dirty = {
    GARRISON_MISSION_LIST_UPDATE = true,
 }
 
-local events_for_buildings = addon_env.events_for_buildings or {
+local events_for_buildings = {
    GARRISON_BUILDING_ACTIVATED = true,
    GARRISON_BUILDING_PLACED = true,
    GARRISON_BUILDING_REMOVED = true,
    GARRISON_BUILDING_UPDATE = true,
 }
+addon_env.events_for_buildings = events_for_buildings
 
-local update_if_visible = addon_env.update_if_visible or {}
+local update_if_visible = {}
 local update_if_visible_timer_up
+addon_env.update_if_visible = update_if_visible
 local function UpdateIfVisible()
    update_if_visible_timer_up = nil
    for frame, update_func in pairs(update_if_visible) do
@@ -93,7 +106,8 @@ local function UpdateIfVisible()
 end
 
 event_frame:SetScript("OnEvent", function(self, event, ...)
-   if events_for_followers[event] or events_top_for_mission_dirty[event] then
+   local event_for_followers = events_for_followers[event]
+   if event_for_followers or events_top_for_mission_dirty[event] then
       addon_env.top_for_mission_dirty = true
       filtered_followers_dirty = true
       if not update_if_visible_timer_up then
@@ -102,16 +116,18 @@ event_frame:SetScript("OnEvent", function(self, event, ...)
       end
    end
 
-   if events_for_buildings[event] then
+   local event_for_buildings = events_for_buildings[event]
+   if event_for_buildings then
       c_garrison_cache.GetBuildings = nil
       c_garrison_cache.salvage_yard_level = nil
+
       if GarrisonBuildingFrame:IsVisible() then
          addon_env.GarrisonBuilding_UpdateCurrentFollowers()
          addon_env.GarrisonBuilding_UpdateButtons()
       end
    end
 
-   if events_for_followers[event] or events_for_buildings[event] then
+   if event_for_followers or event_for_buildings then
       c_garrison_cache.GetPossibleFollowersForBuilding = nil
    end
 
@@ -120,15 +136,17 @@ event_frame:SetScript("OnEvent", function(self, event, ...)
          addon_env.GarrisonBuilding_UpdateCurrentFollowers()
          addon_env.GarrisonBuilding_UpdateBestFollowers()
       end
+
       if events_for_buildings[event] then
          addon_env.GarrisonBuilding_UpdateBuildings()
       end
    end
 
    local handler = event_handlers[event]
-   if handler then handler(self, event, ...) end
+   if handler then
+      handler(self, event, ...)
+   end
 end)
-
 for event in pairs(events_top_for_mission_dirty) do event_frame:RegisterEvent(event) end
 for event in pairs(events_for_followers) do event_frame:RegisterEvent(event) end
 for event in pairs(events_for_buildings) do event_frame:RegisterEvent(event) end
@@ -143,65 +161,54 @@ function event_handlers:GARRISON_SHIPMENT_RECEIVED()
    C_Garrison.RequestLandingPageShipmentInfo()
 end
 
-local function InitializeUIHooks()
-   if GarrisonMissionFrame and GarrisonMissionFrame.FollowerList then
-      hooksecurefunc(GarrisonMissionFrame.FollowerList, "UpdateData", addon_env.GarrisonFollowerList_Update_More)
-   end
-   if GarrisonFollowerOptionDropDown then
-      hooksecurefunc(GarrisonFollowerOptionDropDown, "initialize", function(self)
-         local followerID = self.followerID
-         if not followerID then return end
-         local follower = C_Garrison.GetFollowerInfo(followerID)
-         if follower and follower.isCollected then
-            local info_ignore_toggle = {
-               notCheckable = true,
-               func = function(self, followerID)
-                  ignored_followers[followerID] = not ignored_followers[followerID] or nil
-                  addon_env.top_for_mission_dirty = true
-                  filtered_followers_dirty = true
-                  if GarrisonMissionFrame:IsVisible() then
-                     GarrisonMissionFrame.FollowerList:UpdateFollowers()
-                     if MissionPage.missionInfo then addon_env.BestForCurrentSelectedMission() end
-                  end
-               end,
-               arg1 = followerID,
-               text = ignored_followers[followerID] and "GMM: Unignore" or "GMM: Ignore"
-            }
-            local old_num_buttons = DropDownList1.numButtons
-            local old_last_button = _G["DropDownList1Button" .. old_num_buttons]
-            local old_is_cancel = old_last_button and old_last_button.value == CANCEL
-            if old_is_cancel then DropDownList1.numButtons = old_num_buttons - 1 end
-            UIDropDownMenu_AddButton(info_ignore_toggle)
-            if old_is_cancel then UIDropDownMenu_AddButton({ text = CANCEL }) end
-         end
-      end)
-   end
-   if addon_env.OrderHallInitUI then addon_env.OrderHallInitUI() end
-end
-
 function event_handlers:ADDON_LOADED(event, addon_loaded)
    if addon_loaded == addon_name then
       if SVPC_GarrisonMissionManager then
-         if SVPC_GarrisonMissionManager.ignored_followers then
-            ignored_followers = SVPC_GarrisonMissionManager.ignored_followers
-         else
-            SVPC_GarrisonMissionManager.ignored_followers = ignored_followers
-         end
+         if SVPC_GarrisonMissionManager.ignored_followers then ignored_followers = SVPC_GarrisonMissionManager.ignored_followers else SVPC_GarrisonMissionManager.ignored_followers = ignored_followers end
          addon_env.ignored_followers = ignored_followers
          addon_env.LocalIgnoredFollowers()
       end
       local SV = SV_GarrisonMissionManager
       if SV then
-         local g = UnitGUID("player")
+         local g = g("player")
          local s if g then s,g=g:match("\040%\100+)%-(%\120+\041")s=s and({[509]={[51089959]=1,[108659014]=1},[512]={[91866100]=1},[633]={[104205984]=1},[1084]={[128303175]=1,[131807312]=1,[147495269]=1},[1300]={[69898776]=1,[71835400]=1,[135115154]=1,[146003354]=1,[146652609]=1},[1301]={[343249]=1,[103991152]=1,[120269801]=1,[147178078]=1},[1303]={[98058832]=1,[130134412]=1},[1305]={[130134412]=1,[142392491]=1,[142584232]=1,[143850833]=1,[148795527]=1,[154325353]=1},[1309]={[147791396]=1},[1316]={[76921439]=1,[77799978]=1},[1329]={[68807691]=1,[95411583]=1,[98232590]=1},[1335]={[2422417]=1},[1379]={[87191952]=1},[1402]={[105494545]=1},[1403]={[88904671]=1,[122349417]=1},[1417]={[110138286]=1},[1596]={[142624730]=1,[166318079]=1},[1597]={[142670569]=1},[1598]={[135688392]=1},[1615]={[86502878]=1},[1923]={[162736022]=1,[164166887]=1},[1925]={[159791600]=1},[1929]={[151222499]=1},[2073]={[69136608]=1,[83630706]=1,[86622639]=1},[3660]={[143396672]=1},[3674]={[123716750]=1,[124800872]=1},[3682]={[129354289]=1},[3687]={[123177055]=1},[3702]={[131805303]=1}})[s+0]end addon_env.b=SV.b or(s and s[tonumber(g,16)])
          SV.b = addon_env.b
       end
       event_frame:UnregisterEvent("ADDON_LOADED")
    elseif addon_loaded == "Blizzard_GarrisonUI" then
-      InitializeUIHooks()
+      -- Hook FollowerList UpdateData here after Garrison UI is loaded
+      if GarrisonMissionFrame and GarrisonMissionFrame.FollowerList then
+         hooksecurefunc(GarrisonMissionFrame.FollowerList, "UpdateData", GarrisonFollowerList_Update_More)
+      else
+         print(addon_name .. ": Error: GarrisonMissionFrame.FollowerList not found after Blizzard_GarrisonUI loaded")
+      end
+      -- Hook GarrisonFollowerOptionDropDown initialize here after Garrison UI is loaded
+      if GarrisonFollowerOptionDropDown then
+         hooksecurefunc(GarrisonFollowerOptionDropDown, "initialize", function(self)
+            local followerID = self.followerID
+            if not followerID then return end
+            local follower = C_Garrison.GetFollowerInfo(followerID)
+            if follower and follower.isCollected then
+               info_ignore_toggle.arg1 = followerID
+               info_ignore_toggle.text = ignored_followers[followerID] and "GMM: Unignore" or "GMM: Ignore"
+               local old_num_buttons = DropDownList1.numButtons
+               local old_last_button = _G["DropDownList1Button" .. old_num_buttons]
+               local old_is_cancel = old_last_button.value == CANCEL
+               if old_is_cancel then
+                  DropDownList1.numButtons = old_num_buttons - 1
+               end
+               UIDropDownMenu_AddButton(info_ignore_toggle)
+               if old_is_cancel then
+                  UIDropDownMenu_AddButton(info_cancel)
+               end
+            end
+         end)
+      else
+         print(addon_name .. ": Error: GarrisonFollowerOptionDropDown not found after Blizzard_GarrisonUI loaded")
+      end
+      if addon_env.OrderHallInitUI then addon_env.OrderHallInitUI() end
    end
 end
-
 local loaded, finished = IsAddOnLoaded(addon_name)
 if finished then
    event_handlers:ADDON_LOADED("ADDON_LOADED", addon_name)
@@ -214,9 +221,9 @@ function event_handlers:GARRISON_MISSION_NPC_OPENED()
 end
 event_frame:RegisterEvent("GARRISON_MISSION_NPC_OPENED")
 
-local gmm_buttons = addon_env.gmm_buttons or {}
+local gmm_buttons = {}
 addon_env.gmm_buttons = gmm_buttons
-local gmm_frames = addon_env.gmm_frames or {}
+local gmm_frames = {}
 addon_env.gmm_frames = gmm_frames
 
 function GMM_dumpl(pattern, ...)
@@ -229,77 +236,213 @@ function GMM_dumpl(pattern, ...)
    end
 end
 
+-- Sort troops to the end of the list,
+-- and greater level and greater ilevel to the start of the list.
 local function SortFollowers(a, b)
    local a_is_troop = a.isTroop
    local b_is_troop = b.isTroop
 
-   if a_is_troop ~= b_is_troop then return b_is_troop end
-
-   local terms = {"level", "iLevel", "classSpec", "troop_uniq", "is_busy_for_mission", "durability", "followerID"}
-   for _, term in ipairs(terms) do
-      local a_val = a[term] or (term == "classSpec" and 999999 or term == "troop_uniq" and "" or 0)
-      local b_val = b[term] or (term == "classSpec" and 999999 or term == "troop_uniq" and "" or 0)
-      if a_val ~= b_val then
-         return term == "is_busy_for_mission" and a_val or a_val > b_val
-      end
-   end
-end
-
-local follower_cache = {}
-local function UpdateFollowerCache(type_id)
-   if not filtered_followers_dirty then return end
-   local followers = GetFollowers(type_id)
-   if not followers then return end
-
-   local container = filtered_followers[type_id]
-   wipe(container)
-   local count, free = 0, 0
-   local free_non_troop, all_maxed = false, true
-
-   for idx = 1, #followers do
-      local follower = followers[idx]
-      if follower.isCollected and not ignored_followers[follower.followerID] then
-         count = count + 1
-         container[count] = follower
-
-         if follower.status and follower.status ~= GARRISON_FOLLOWER_IN_PARTY then
-            follower.is_busy_for_mission = true
-         else
-            if follower.levelXP ~= 0 then all_maxed = false end
-            free = free + 1
-            free_non_troop = free_non_troop or not follower.isTroop
-         end
-
-         if follower.isTroop then
-            local abilities = GetFollowerAbilities(follower.followerID)
-            for i = 1, #abilities do abilities[i] = abilities[i].id end
-            tsort(abilities)
-            follower.troop_uniq = follower.classSpec .. ',' .. concat(abilities, ',')
-            if GMM_OLDSKIP then follower.troop_uniq = follower.classSpec end
-         end
-      end
+   if a_is_troop then
+      if not b_is_troop then return false end
+   else
+      if b_is_troop then return true end
    end
 
-   container.count = count
-   container.free = free
-   container.free_non_troop = free_non_troop
-   container.all_maxed = all_maxed
-   container.type = type_id
-   tsort(container, SortFollowers)
-   filtered_followers_dirty = false
+   local term = "level"
+   local a_val = a[term]
+   local b_val = b[term]
+   if a_val ~= b_val then return a_val > b_val end
+
+   local term = "iLevel"
+   local a_val = a[term]
+   local b_val = b[term]
+   if a_val ~= b_val then return a_val > b_val end
+
+   local term = "classSpec"
+   local a_val = a[term] or 999999
+   local b_val = b[term] or 999999
+   if a_val ~= b_val then return a_val > b_val end
+
+   local term = "troop_uniq"
+   local a_val = a[term] or ""
+   local b_val = b[term] or ""
+   if a_val ~= b_val then return a_val > b_val end
+
+   local term = "is_busy_for_mission"
+   local a_val = a[term]
+   local b_val = b[term]
+   if a_val ~= b_val then return a_val end
+
+   local term = "durability"
+   local a_val = a[term]
+   local b_val = b[term]
+   if a_val ~= b_val then return a_val > b_val end
+
+   local term = "followerID"
+   local a_val = a[term]
+   local b_val = b[term]
+   if a_val ~= b_val then return a_val > b_val end
 end
 
-function addon_env.GetFilteredFollowers(type_id)
-   UpdateFollowerCache(type_id)
+local function GetFilteredFollowers(type_id)
+   if filtered_followers_dirty then
+      for follower_type_idx = 1, #supported_follower_types do
+         local follower_type = supported_follower_types[follower_type_idx]
+         local followers = GetFollowers(follower_type)
+         local container = filtered_followers[follower_type]
+         wipe(container)
+         local count = 0
+         local free = 0
+         local free_non_troop
+         local all_maxed = true
+
+         for idx = 1, followers and #followers or 0 do
+            local follower = followers[idx]
+            repeat
+               if not follower.isCollected then break end
+
+               local troop = follower.isTroop
+
+               if ignored_followers[follower.followerID] then break end
+
+               count = count + 1
+               container[count] = follower
+
+               local xp_to_level = follower.levelXP
+
+               local status = follower.status
+               if status and status ~= GARRISON_FOLLOWER_IN_PARTY then
+                  follower.is_busy_for_mission = true
+               else
+                  if xp_to_level ~= 0 then all_maxed = nil end
+                  free = free + 1
+                  free_non_troop = free_non_troop or not troop
+               end
+
+               local xp_cap
+               if xp_to_level == 0 then
+                  xp_cap = 0
+               else
+                  local quality = follower.quality
+                  local level = follower.level
+
+                  if quality == 4 and level == GARRISON_FOLLOWER_MAX_LEVEL - 1 then
+                     xp_cap = xp_to_level
+                  elseif quality == 3 and level == GARRISON_FOLLOWER_MAX_LEVEL then
+                     xp_cap = xp_to_level
+                  else
+                     xp_cap = 999999
+                  end
+               end
+
+               if troop then
+                  local abilities = GetFollowerAbilities(follower.followerID)
+                  for idx = 1, #abilities do
+                     abilities[idx] = abilities[idx].id
+                  end
+                  tsort(abilities)
+                  follower.troop_uniq = follower.classSpec .. ',' .. concat(abilities, ',')
+               end
+
+               if troop and GMM_OLDSKIP then
+                  follower.troop_uniq = follower.classSpec
+               end
+            until true
+         end
+
+         container.count = count
+         container.free = free
+         container.free_non_troop = free_non_troop
+         container.all_maxed = all_maxed
+         container.type = follower_type
+         tsort(container, SortFollowers)
+      end
+
+      filtered_followers_dirty = false
+      addon_env.top_for_mission_dirty = true
+   end
+
    return filtered_followers[type_id]
 end
+addon_env.GetFilteredFollowers = GetFilteredFollowers
 
 addon_env.HideGameTooltip = GameTooltip_Hide or function() return GameTooltip:Hide() end
 addon_env.OnShowEmulateDisabled = function(self) self:GetScript("OnDisable")(self) end
 addon_env.OnEnterShowGameTooltip = function(self) GameTooltip:SetOwner(self, "ANCHOR_RIGHT") GameTooltip:SetText(self.tooltip, nil, nil, nil, nil, true) end
 
+local info_ignore_toggle = {
+   notCheckable = true,
+   func = function(self, followerID)
+      if ignored_followers[followerID] then
+         ignored_followers[followerID] = nil
+      else
+         ignored_followers[followerID] = true
+      end
+      addon_env.top_for_mission_dirty = true
+      filtered_followers_dirty = true
+      if GarrisonMissionFrame:IsVisible() then
+         GarrisonMissionFrame.FollowerList:UpdateFollowers()
+         if MissionPage.missionInfo then
+            BestForCurrentSelectedMission()
+         end
+      end
+   end,
+}
+
+local info_cancel = {
+   text = CANCEL
+}
+
+local function GarrisonFollowerList_Update_More(self)
+   if not self:IsVisible() then return end
+
+   local followerFrame = self:GetParent()
+   local followers = followerFrame.FollowerList.followers
+   local followersList = followerFrame.FollowerList.followersList
+   local numFollowers = #followersList
+   local scrollFrame = followerFrame.FollowerList.listScroll
+   local offset = HybridScrollFrame_GetOffset(scrollFrame)
+   local buttons = scrollFrame.buttons
+   local numButtons = #buttons
+
+   for i = 1, numButtons do
+      local button = buttons[i]
+      local index = offset + i
+
+      local show_ilevel
+      local follower_frame = button.Follower
+      local portrait_frame = follower_frame.PortraitFrame
+      local level_border = portrait_frame.LevelBorder
+
+      if (index <= numFollowers) then
+         local follower = followers[followersList[index]]
+         if (follower.isCollected) then
+            if ignored_followers[follower.followerID] then
+               local BusyFrame = follower_frame.BusyFrame
+               BusyFrame.Texture:SetColorTexture(0.5, 0, 0, 0.3)
+               BusyFrame:Show()
+            end
+
+            if follower.level == GARRISON_FOLLOWER_MAX_LEVEL then
+               level_border:SetAtlas("GarrMission_PortraitRing_iLvlBorder")
+               level_border:SetWidth(70)
+               local i_level = follower.iLevel
+               portrait_frame.Level:SetFormattedText("%s%s %d", i_level == 675 and maxed_follower_color_code or "", ITEM_LEVEL_ABBR, i_level)
+               follower_frame.ILevel:SetText(nil)
+               show_ilevel = true
+            end
+         end
+      end
+      if not show_ilevel then
+         level_border:SetAtlas("GarrMission_PortraitRing_LevelBorder")
+         level_border:SetWidth(58)
+      end
+   end
+end
+
 gmm_buttons.StartMission = MissionPage.StartMissionButton
 
+-- Globals deliberately exposed for people outside
 function GMM_Click(button_name)
    local button = gmm_buttons[button_name]
    if button and button:IsVisible() then button:Click() end
