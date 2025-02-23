@@ -145,7 +145,7 @@ end
 
 local function InitializeUIHooks()
    if GarrisonMissionFrame and GarrisonMissionFrame.FollowerList then
-      hooksecurefunc(GarrisonMissionFrame.FollowerList, "UpdateData", GarrisonFollowerList_Update_More)
+      hooksecurefunc(GarrisonMissionFrame.FollowerList, "UpdateData", addon_env.GarrisonFollowerList_Update_More)
    end
    if GarrisonFollowerOptionDropDown then
       hooksecurefunc(GarrisonFollowerOptionDropDown, "initialize", function(self)
@@ -153,14 +153,26 @@ local function InitializeUIHooks()
          if not followerID then return end
          local follower = C_Garrison.GetFollowerInfo(followerID)
          if follower and follower.isCollected then
-            info_ignore_toggle.arg1 = followerID
-            info_ignore_toggle.text = ignored_followers[followerID] and "GMM: Unignore" or "GMM: Ignore"
+            local info_ignore_toggle = {
+               notCheckable = true,
+               func = function(self, followerID)
+                  ignored_followers[followerID] = not ignored_followers[followerID] or nil
+                  addon_env.top_for_mission_dirty = true
+                  filtered_followers_dirty = true
+                  if GarrisonMissionFrame:IsVisible() then
+                     GarrisonMissionFrame.FollowerList:UpdateFollowers()
+                     if MissionPage.missionInfo then addon_env.BestForCurrentSelectedMission() end
+                  end
+               end,
+               arg1 = followerID,
+               text = ignored_followers[followerID] and "GMM: Unignore" or "GMM: Ignore"
+            }
             local old_num_buttons = DropDownList1.numButtons
             local old_last_button = _G["DropDownList1Button" .. old_num_buttons]
-            local old_is_cancel = old_last_button.value == CANCEL
+            local old_is_cancel = old_last_button and old_last_button.value == CANCEL
             if old_is_cancel then DropDownList1.numButtons = old_num_buttons - 1 end
             UIDropDownMenu_AddButton(info_ignore_toggle)
-            if old_is_cancel then UIDropDownMenu_AddButton(info_cancel) end
+            if old_is_cancel then UIDropDownMenu_AddButton({ text = CANCEL }) end
          end
       end)
    end
@@ -285,72 +297,6 @@ end
 addon_env.HideGameTooltip = GameTooltip_Hide or function() return GameTooltip:Hide() end
 addon_env.OnShowEmulateDisabled = function(self) self:GetScript("OnDisable")(self) end
 addon_env.OnEnterShowGameTooltip = function(self) GameTooltip:SetOwner(self, "ANCHOR_RIGHT") GameTooltip:SetText(self.tooltip, nil, nil, nil, nil, true) end
-
-local info_ignore_toggle = {
-   notCheckable = true,
-   func = function(self, followerID)
-      ignored_followers[followerID] = not ignored_followers[followerID] or nil
-      addon_env.top_for_mission_dirty = true
-      filtered_followers_dirty = true
-      if GarrisonMissionFrame:IsVisible() then
-         GarrisonMissionFrame.FollowerList:UpdateFollowers()
-         if MissionPage.missionInfo then BestForCurrentSelectedMission() end
-      end
-   end,
-}
-
-local info_cancel = { text = CANCEL }
-
-local function GarrisonFollowerList_Update_More(self)
-   if not self:IsVisible() then return end
-
-   local followerFrame = self:GetParent()
-   local followers = followerFrame.FollowerList.followers
-   local followersList = followerFrame.FollowerList.followersList
-   if not followersList then
-      followersList = {}
-      for k in pairs(followers) do followersList[#followersList + 1] = k end
-   end
-   local numFollowers = #followersList
-   local scrollFrame = followerFrame.FollowerList.listScroll
-   local offset = HybridScrollFrame_GetOffset(scrollFrame)
-   local buttons = scrollFrame.buttons
-   local numButtons = #buttons
-
-   for i = 1, numButtons do
-      local button = buttons[i]
-      local index = offset + i
-
-      local show_ilevel
-      local follower_frame = button.Follower
-      local portrait_frame = follower_frame.PortraitFrame
-      local level_border = portrait_frame.LevelBorder
-
-      if index <= numFollowers then
-         local follower = followers[followersList[index]]
-         if follower.isCollected then
-            if ignored_followers[follower.followerID] then
-               local BusyFrame = follower_frame.BusyFrame
-               BusyFrame.Texture:SetColorTexture(0.5, 0, 0, 0.3)
-               BusyFrame:Show()
-            end
-
-            if follower.level == GARRISON_FOLLOWER_MAX_LEVEL then
-               level_border:SetAtlas("GarrMission_PortraitRing_iLvlBorder")
-               level_border:SetWidth(70)
-               local i_level = follower.iLevel
-               portrait_frame.Level:SetFormattedText("%s%s %d", i_level == 675 and maxed_follower_color_code or "", ITEM_LEVEL_ABBR, i_level)
-               follower_frame.ILevel:SetText(nil)
-               show_ilevel = true
-            end
-         end
-      end
-      if not show_ilevel then
-         level_border:SetAtlas("GarrMission_PortraitRing_LevelBorder")
-         level_border:SetWidth(58)
-      end
-   end
-end
 
 gmm_buttons.StartMission = MissionPage.StartMissionButton
 
