@@ -17,6 +17,12 @@ function addon_env.AddInitUI(gmm_options)
    local follower_type = gmm_options.follower_type
    local options = GarrisonFollowerOptions[follower_type]
 
+   if not options then
+      print(addon_name .. ": Error: GarrisonFollowerOptions[" .. tostring(follower_type) .. "] is nil. Delaying initialization.")
+      pending_init[tostring(follower_type)] = gmm_options -- Use a temporary key if options is nil
+      return
+   end
+
    gmm_options.base_frame_name = options.missionFrame
    -- TODO: combine into single function function
    addon_env.InitGMMFollowerOptions(gmm_options)
